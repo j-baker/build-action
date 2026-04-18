@@ -1,0 +1,90 @@
+name: trustless-build
+description: >-
+  Configure a GitHub runner to use a Trustless Nix cache, then run a build
+  command (default `nix flake check`).
+
+inputs:
+  command:
+    description: Command to run after configuring the cache.
+    required: false
+    default: nix flake check
+  working-directory:
+    description: Working directory for `command`.
+    required: false
+    default: .
+  api-endpoint:
+    description: Trustless API endpoint (OIDC → SSH key exchange).
+    required: false
+    default: https://www.trustless.build/api
+  ssh-host:
+    description: SSH host used for `credential_process` and `known_hosts`.
+    required: false
+    default: trustless.build
+  audience:
+    description: OIDC audience claim requested from GitHub.
+    required: false
+    default: trustless
+  aws-config-path:
+    description: Path the AWS `[profile …]` block is written to.
+    required: false
+    default: /root/.aws/config
+  nix-conf-path:
+    description: Path the `extra-substituters` + `extra-trusted-public-keys` lines are appended to.
+    required: false
+    default: /etc/nix/nix.conf
+
+runs:
+  using: composite
+  steps:
+    - name: Download trustless-provisioner
+      shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        bindir="${RUNNER_TEMP}/trustless-build"
+        mkdir -p "$bindir"
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64) asset="trustless-provisioner-x86_64-linux" ;;
+          aarch64) asset="trustless-provisioner-aarch64-linux" ;;
+          *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+        esac
+        # $ACTION_REF is the ref the user pinned (e.g. "v1" or "v1.2.3" or a SHA).
+        # Release assets are published under that same tag on this action's repo.
+        gh release download "$ACTION_REF" \
+          --repo "$GITHUB_ACTION_REPOSITORY" \
+          --pattern "$asset" \
+          --output "$bindir/trustless-provisioner"
+        chmod +x "$bindir/trustless-provisioner"
+        echo "$bindir" >> "$GITHUB_PATH"
+
+    - name: Exchange OIDC token + write cache config
+      shell: bash
+      env:
+        TRUSTLESS_API_ENDPOINT: ${{ inputs.api-endpoint }}
+        TRUSTLESS_SSH_HOST: ${{ inputs.ssh-host }}
+      run: |
+        set -euo pipefail
+        sudo -E "$(command -v trustless-provisioner)" auth \
+          --audience "${{ inputs.audience }}" \
+          --aws-config-path "${{ inputs.aws-config-path }}" \
+          --nix-conf-path "${{ inputs.nix-conf-path }}" \
+          --output-dir /root/.ssh
+
+    - name: Reload nix-daemon
+      shell: bash
+      run: |
+        set -euo pipefail
+        if systemctl list-unit-files nix-daemon.service >/dev/null 2>&1; then
+          sudo systemctl reload nix-daemon || sudo systemctl restart nix-daemon
+        else
+          # No systemd (shouldn't happen on GH-hosted Linux runners, but fall back gracefully)
+          sudo pkill -HUP nix-daemon || true
+        fi
+
+    - name: Run build command
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: ${{ inputs.command }}
