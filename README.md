@@ -37,8 +37,8 @@ fail with a clear message otherwise.
 | `api-endpoint` | `https://www.trustless.build/api` | Trustless API for the OIDC exchange. |
 | `ssh-host` | `trustless.build` | Host used for `credential_process` and `known_hosts`. |
 | `audience` | `trustless` | OIDC audience claim. |
-| `aws-config-path` | `/root/.aws/config` | Where to write the AWS profile block. |
-| `nix-conf-path` | `/etc/nix/nix.conf` | Where to append substituter + trusted-key lines. |
+| `aws-config-path` | `/root/.aws/config` | Where the `[profile trustless-…]` block is written. Read by the nix daemon (root) to mint substituter creds. |
+| `nix-conf-path` | `/etc/nix/nix.conf` | Where substituter + trusted-public-keys lines are appended (system-wide). |
 | `github-token` | `${{ github.token }}` | Token used to download the release asset. Only override when this action's repo is private and consumed from a different repo — see "Private action repo" below. |
 
 ## Private action repo

@@ -25,7 +25,7 @@ inputs:
     required: false
     default: trustless
   aws-config-path:
-    description: Path the AWS `[profile …]` block is written to.
+    description: Path the AWS `[profile …]` block is written to. Read by the nix daemon (root) for substituter credential minting.
     required: false
     default: /root/.aws/config
   nix-conf-path:
@@ -88,6 +88,34 @@ runs:
           --aws-config-path "${{ inputs.aws-config-path }}" \
           --nix-conf-path "${{ inputs.nix-conf-path }}" \
           --output-dir /root/.ssh
+
+    - name: Install SSH key + known_hosts for the runner user
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh-host }}
+      run: |
+        set -euo pipefail
+        # The provisioner writes to root (daemon reads /root/.aws/config +
+        # /etc/nix/nix.conf for substituter auth), but the `nix build
+        # --store ssh-ng://…` step runs as the runner user and so reads
+        # ~/.ssh from the runner's home. Copy the ephemeral key and append
+        # the trustless host-key line idempotently.
+        mkdir -p "$HOME/.ssh"
+        chmod 0700 "$HOME/.ssh"
+        uid="$(id -u)"
+        gid="$(id -g)"
+        sudo install -m 0600 -o "$uid" -g "$gid" \
+          /root/.ssh/id_ed25519 "$HOME/.ssh/id_ed25519"
+        sudo install -m 0644 -o "$uid" -g "$gid" \
+          /root/.ssh/id_ed25519.pub "$HOME/.ssh/id_ed25519.pub"
+        touch "$HOME/.ssh/known_hosts"
+        # Extract just the line(s) for our SSH host from root's known_hosts
+        # and append to the user's if not already present.
+        sudo grep -h "^${SSH_HOST} " /root/.ssh/known_hosts \
+          | while IFS= read -r line; do
+              grep -qxF "$line" "$HOME/.ssh/known_hosts" \
+                || echo "$line" >> "$HOME/.ssh/known_hosts"
+            done
 
     - name: Restart nix-daemon
       shell: bash
