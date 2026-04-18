@@ -89,18 +89,28 @@ runs:
           --nix-conf-path "${{ inputs.nix-conf-path }}" \
           --output-dir /root/.ssh
 
-    - name: Reload nix-daemon
+    - name: Restart nix-daemon
       shell: bash
       run: |
         set -euo pipefail
+        # The DeterminateSystems / cachix installer units don't declare
+        # ExecReload, so `systemctl reload` always errors — use restart
+        # unconditionally. Restart is fast (~100ms) and there are no
+        # in-flight builds to interrupt at this point in the action.
         if systemctl list-unit-files nix-daemon.service >/dev/null 2>&1; then
-          sudo systemctl reload nix-daemon || sudo systemctl restart nix-daemon
+          sudo systemctl restart nix-daemon
         else
-          # No systemd (shouldn't happen on GH-hosted Linux runners, but fall back gracefully)
           sudo pkill -HUP nix-daemon || true
         fi
 
     - name: Run build command
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        # Evaluate locally, offload the actual build to the Trustless remote
+        # store. Scoped to this step so users' subsequent `nix ...` commands
+        # outside the action aren't affected.
+        NIX_CONFIG: |
+          store = ssh-ng://${{ inputs.ssh-host }}
+          eval-store = auto
       run: ${{ inputs.command }}
