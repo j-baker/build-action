@@ -48,10 +48,19 @@ runs:
     - name: Download trustless-provisioner
       shell: bash
       env:
+        # Resolved from the expression context, which is reliably populated in
+        # composite actions — the `GITHUB_ACTION_REPOSITORY` env var has been
+        # known to expand empty, in which case gh falls back to inferring the
+        # repo from $CWD (i.e. the caller's checkout), which is wrong.
         ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPO: ${{ github.action_repository }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
+        if [ -z "$ACTION_REPO" ] || [ -z "$ACTION_REF" ]; then
+          echo "ERROR: github.action_repository or github.action_ref is empty; refusing to guess." >&2
+          exit 1
+        fi
         bindir="${RUNNER_TEMP}/trustless-build"
         mkdir -p "$bindir"
         arch="$(uname -m)"
@@ -60,10 +69,8 @@ runs:
           aarch64) asset="trustless-provisioner-aarch64-linux" ;;
           *) echo "unsupported arch: $arch" >&2; exit 1 ;;
         esac
-        # $ACTION_REF is the ref the user pinned (e.g. "v1" or "v1.2.3" or a SHA).
-        # Release assets are published under that same tag on this action's repo.
         gh release download "$ACTION_REF" \
-          --repo "$GITHUB_ACTION_REPOSITORY" \
+          --repo "$ACTION_REPO" \
           --pattern "$asset" \
           --output "$bindir/trustless-provisioner"
         chmod +x "$bindir/trustless-provisioner"
