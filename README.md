@@ -39,6 +39,28 @@ fail with a clear message otherwise.
 | `audience` | `trustless` | OIDC audience claim. |
 | `aws-config-path` | `/root/.aws/config` | Where to write the AWS profile block. |
 | `nix-conf-path` | `/etc/nix/nix.conf` | Where to append substituter + trusted-key lines. |
+| `github-token` | `${{ github.token }}` | Token used to download the release asset. Only override when this action's repo is private and consumed from a different repo — see "Private action repo" below. |
+
+## Private action repo
+
+If you're consuming this action from a different repo than the one hosting it
+— even within the same organization — the default `GITHUB_TOKEN` can't read
+the action repo's releases, because it's scoped to the caller's repo only.
+The symptom is `release not found` on the download step.
+
+Fix: create a PAT (or fine-grained token, or GitHub App install token) with
+`Contents:read` on the action's repo, add it as a secret to the consumer
+repo, and pass it in:
+
+```yaml
+- uses: owner/build-action@v1
+  with:
+    github-token: ${{ secrets.TRUSTLESS_BUILD_PAT }}
+```
+
+You don't need this if the action's repo is public, or if it lives in the
+same repo as the caller (in which case `uses: ./path/to/action` skips the
+download entirely).
 
 ## Prerequisites
 

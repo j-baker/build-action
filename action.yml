@@ -32,6 +32,15 @@ inputs:
     description: Path the `extra-substituters` + `extra-trusted-public-keys` lines are appended to.
     required: false
     default: /etc/nix/nix.conf
+  github-token:
+    description: >-
+      Token used to download this action's release asset. The default job
+      `GITHUB_TOKEN` works when the action's repo is public, or same-repo as
+      the caller. For a private action repo consumed from a different repo
+      (even within the same org), supply a PAT or fine-grained token with
+      `Contents:read` on the action's repo via `secrets.…`.
+    required: false
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -40,7 +49,7 @@ runs:
       shell: bash
       env:
         ACTION_REF: ${{ github.action_ref }}
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
         bindir="${RUNNER_TEMP}/trustless-build"
