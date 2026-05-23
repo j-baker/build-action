@@ -12,6 +12,12 @@ inputs:
     description: Working directory for `command`.
     required: false
     default: .
+  org-slug:
+    description: >-
+      Trustless organisation slug that owns the cache. Required: the OIDC token
+      is verified against this org's source-code-manager and the repo must
+      match one of the org's cache access rules.
+    required: true
   api-endpoint:
     description: Trustless API endpoint (OIDC → SSH key exchange).
     required: false
@@ -21,9 +27,12 @@ inputs:
     required: false
     default: trustless.build
   audience:
-    description: OIDC audience claim requested from GitHub.
+    description: >-
+      OIDC audience claim requested from GitHub. Must match the value Trustless
+      enforces (`trustless.build`); the server rejects tokens with any other
+      audience.
     required: false
-    default: trustless
+    default: trustless.build
   aws-config-path:
     description: Path the AWS `[profile …]` block is written to. Read by the nix daemon (root) for substituter credential minting.
     required: false
@@ -41,6 +50,24 @@ inputs:
       `Contents:read` on the action's repo via `secrets.…`.
     required: false
     default: ${{ github.token }}
+  versioned-packages:
+    description: >-
+      Space-separated package attribute names to publish as trustless version
+      pointers after a successful build (resolved as `<versioned-flake>#<name>`).
+      Leave empty to publish nothing. The ref is taken from the run's OIDC token,
+      not from here.
+    required: false
+    default: ""
+  versioned-nixos-configurations:
+    description: >-
+      Space-separated nixosConfiguration names to publish as version pointers
+      (resolved via `.config.system.build.toplevel`).
+    required: false
+    default: ""
+  versioned-flake:
+    description: Flake reference to evaluate versioned outputs from.
+    required: false
+    default: .
 
 runs:
   using: composite
@@ -84,6 +111,7 @@ runs:
       run: |
         set -euo pipefail
         sudo -E "$(command -v trustless-provisioner)" auth \
+          --org-slug "${{ inputs.org-slug }}" \
           --audience "${{ inputs.audience }}" \
           --aws-config-path "${{ inputs.aws-config-path }}" \
           --nix-conf-path "${{ inputs.nix-conf-path }}" \
@@ -140,3 +168,27 @@ runs:
       # commands or wrap in a shell script, invoke nix yourself with these
       # flags and leave `command` pointing at the outer script.
       run: ${{ inputs.command }} --store ssh-ng://${{ inputs.ssh-host }} --eval-store auto
+
+    - name: Publish versioned outputs
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PKGS: ${{ inputs.versioned-packages }}
+        CFGS: ${{ inputs.versioned-nixos-configurations }}
+        FLAKE: ${{ inputs.versioned-flake }}
+        SSH_HOST: ${{ inputs.ssh-host }}
+      # Resolve the declared outputs to store paths and publish ref->path
+      # pointers. The build above must have realised (and thus cached) these
+      # paths via the ssh-ng store — `push-version` rejects uncached outputs.
+      # The ref and repository come from the OIDC-bound key, so this can only
+      # move the pointer for the ref this run actually ran on.
+      run: |
+        set -euo pipefail
+        if [ -z "$PKGS" ] && [ -z "$CFGS" ]; then
+          echo "No versioned outputs declared; skipping."
+          exit 0
+        fi
+        args=(push-versions --flake "$FLAKE" --ssh-host "$SSH_HOST")
+        for p in $PKGS; do args+=(--package "$p"); done
+        for c in $CFGS; do args+=(--nixos-configuration "$c"); done
+        "$(command -v trustless-provisioner)" "${args[@]}"
