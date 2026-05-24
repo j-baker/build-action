@@ -77,8 +77,7 @@ runs:
       env:
         # Resolved from the expression context, which is reliably populated in
         # composite actions — the `GITHUB_ACTION_REPOSITORY` env var has been
-        # known to expand empty, in which case gh falls back to inferring the
-        # repo from $CWD (i.e. the caller's checkout), which is wrong.
+        # known to expand empty, in which case we'd infer the wrong repo.
         ACTION_REF: ${{ github.action_ref }}
         ACTION_REPO: ${{ github.action_repository }}
         GH_TOKEN: ${{ inputs.github-token }}
@@ -96,10 +95,16 @@ runs:
           aarch64) asset="trustless-provisioner-aarch64-linux" ;;
           *) echo "unsupported arch: $arch" >&2; exit 1 ;;
         esac
-        gh release download "$ACTION_REF" \
-          --repo "$ACTION_REPO" \
-          --pattern "$asset" \
-          --output "$bindir/trustless-provisioner"
+        # Fetch the release asset directly over HTTPS — no `gh` needed, which
+        # keeps this working on the bare actions/runner-based trustless AMI.
+        # The Authorization header authorizes the github.com hop (required when
+        # the action repo is private); curl's -L drops it on the cross-host
+        # redirect to the asset CDN, whose URL is already signed. For a public
+        # action repo the header is simply accepted and otherwise ignored.
+        curl -fsSL \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -o "$bindir/trustless-provisioner" \
+          "https://github.com/${ACTION_REPO}/releases/download/${ACTION_REF}/${asset}"
         chmod +x "$bindir/trustless-provisioner"
         echo "$bindir" >> "$GITHUB_PATH"
 
