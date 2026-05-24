@@ -95,16 +95,39 @@ runs:
           aarch64) asset="trustless-provisioner-aarch64-linux" ;;
           *) echo "unsupported arch: $arch" >&2; exit 1 ;;
         esac
-        # Fetch the release asset directly over HTTPS — no `gh` needed, which
-        # keeps this working on the bare actions/runner-based trustless AMI.
-        # The Authorization header authorizes the github.com hop (required when
-        # the action repo is private); curl's -L drops it on the cross-host
-        # redirect to the asset CDN, whose URL is already signed. For a public
-        # action repo the header is simply accepted and otherwise ignored.
-        curl -fsSL \
-          -H "Authorization: Bearer ${GH_TOKEN}" \
-          -o "$bindir/trustless-provisioner" \
-          "https://github.com/${ACTION_REPO}/releases/download/${ACTION_REF}/${asset}"
+        api="https://api.github.com/repos/${ACTION_REPO}"
+        auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28")
+        # Resolve the release by tag via the API. We download via the asset's
+        # API URL (Accept: application/octet-stream) rather than the
+        # github.com/.../releases/download/<tag>/<asset> browser URL, because
+        # that browser URL is not authorizable with a bearer token and 404s
+        # for private action repos. This mirrors what `gh release download`
+        # does internally — no `gh` needed, so it works on the bare
+        # actions/runner-based trustless AMI.
+        rel="${RUNNER_TEMP}/trustless-release.json"
+        code="$(curl -sS -w '%{http_code}' -o "$rel" \
+          "${auth[@]}" -H "Accept: application/vnd.github+json" \
+          "${api}/releases/tags/${ACTION_REF}")"
+        if [ "$code" != "200" ]; then
+          echo "ERROR: GitHub API returned HTTP $code fetching release tag '$ACTION_REF' from '$ACTION_REPO'." >&2
+          echo "If the action repo is private and consumed from another repo, supply a token with Contents:read via the 'github-token' input." >&2
+          cat "$rel" >&2 || true
+          exit 1
+        fi
+        # Find the API URL of the asset whose name matches exactly. Parsed with
+        # awk (always present) to avoid a jq dependency the AMI may not have.
+        asset_url="$(awk -v want="$asset" '
+          /"url":/ { if (match($0, /https:\/\/api\.github\.com\/repos\/[^"]*\/releases\/assets\/[0-9]+/)) u = substr($0, RSTART, RLENGTH) }
+          /"name":/ { line = $0; sub(/^[^:]*:[[:space:]]*"/, "", line); sub(/".*/, "", line); if (line == want) { print u; exit } }
+        ' "$rel")"
+        if [ -z "$asset_url" ]; then
+          echo "ERROR: asset '$asset' not found in release '$ACTION_REF' of '$ACTION_REPO'. Available assets:" >&2
+          grep -o '"name": *"[^"]*"' "$rel" >&2 || true
+          exit 1
+        fi
+        curl -fsSL -o "$bindir/trustless-provisioner" \
+          "${auth[@]}" -H "Accept: application/octet-stream" \
+          "$asset_url"
         chmod +x "$bindir/trustless-provisioner"
         echo "$bindir" >> "$GITHUB_PATH"
 
