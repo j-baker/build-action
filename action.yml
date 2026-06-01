@@ -12,6 +12,14 @@ inputs:
     description: Working directory for `command`.
     required: false
     default: .
+  eval-store:
+    description: >-
+      Value for nix's `--eval-store` flag, appended to the build command when
+      non-empty. Set to `auto` to evaluate locally and build on the remote
+      trustless store — required for import-from-derivation. Leave empty to omit
+      the flag entirely (evaluation then runs against the remote store).
+    required: false
+    default: ""
   org-slug:
     description: >-
       Trustless organisation slug that owns the cache. Required: the OIDC token
@@ -190,12 +198,13 @@ runs:
     - name: Run build command
       shell: bash
       working-directory: ${{ inputs.working-directory }}
-      # The `--store ssh-ng://…` and `--eval-store auto` flags are appended
-      # to the command. This assumes `command` is a single nix invocation
-      # (the default is `nix flake check`). If you need to run multiple
-      # commands or wrap in a shell script, invoke nix yourself with these
-      # flags and leave `command` pointing at the outer script.
-      run: ${{ inputs.command }} --store ssh-ng://${{ inputs.ssh-host }} --eval-store auto
+      # The `--store ssh-ng://…` flag (and `--eval-store <value>` when the
+      # `eval-store` input is non-empty) is appended to the command. This
+      # assumes `command` is a single nix invocation (the default is `nix flake
+      # check`). If you need to run multiple commands or wrap in a shell script,
+      # invoke nix yourself with these flags and leave `command` pointing at the
+      # outer script.
+      run: ${{ inputs.command }} --store ssh-ng://${{ inputs.ssh-host }}${{ inputs.eval-store != '' && format(' --eval-store {0}', inputs.eval-store) || '' }}
 
     - name: Publish versioned outputs
       shell: bash
