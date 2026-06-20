@@ -71,9 +71,9 @@ download entirely).
 
 ## How it works
 
-1. Downloads the `trustless-provisioner` binary pinned to the same ref the
+1. Downloads the `trustless-ci` binary pinned to the same ref the
    action is used with (`@v1`, `@v1.2.3`, or a commit SHA).
-2. Runs `trustless-provisioner auth`, which:
+2. Runs `trustless-ci auth`, which:
    - Exchanges the GitHub OIDC token for an ephemeral SSH key tied to this
      job (1h lifetime by default) and writes it to `/root/.ssh/id_ed25519`.
    - Adds the `trustless.build` host key to `/root/.ssh/known_hosts`.

@@ -12,14 +12,6 @@ inputs:
     description: Working directory for `command`.
     required: false
     default: .
-  eval-store:
-    description: >-
-      Value for nix's `--eval-store` flag, appended to the build command when
-      non-empty. Set to `auto` to evaluate locally and build on the remote
-      trustless store — required for import-from-derivation. Leave empty to omit
-      the flag entirely (evaluation then runs against the remote store).
-    required: false
-    default: ""
   org-slug:
     description: >-
       Trustless organisation slug that owns the cache. Required: the OIDC token
@@ -31,7 +23,13 @@ inputs:
     required: false
     default: https://www.trustless.build/api
   ssh-host:
-    description: SSH host used for `credential_process` and `known_hosts`.
+    description: >-
+      Bootstrap SSH host passed to `trustless-ci auth` (TRUSTLESS_SSH_HOST).
+      The server now pins the per-cluster SSH endpoint AND host key in the token
+      exchange, and the action targets that resolved host (TRUSTLESS_HOST) for
+      known_hosts, the build store, and version push. This input is only a
+      legacy fallback for the auth step and is not the host actually used when
+      the server returns a cache setup.
     required: false
     default: trustless.build
   audience:
@@ -80,7 +78,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Download trustless-provisioner
+    - name: Download trustless-ci
       shell: bash
       env:
         # Resolved from the expression context, which is reliably populated in
@@ -99,8 +97,8 @@ runs:
         mkdir -p "$bindir"
         arch="$(uname -m)"
         case "$arch" in
-          x86_64) asset="trustless-provisioner-x86_64-linux" ;;
-          aarch64) asset="trustless-provisioner-aarch64-linux" ;;
+          x86_64) asset="trustless-ci-x86_64-linux" ;;
+          aarch64) asset="trustless-ci-aarch64-linux" ;;
           *) echo "unsupported arch: $arch" >&2; exit 1 ;;
         esac
         api="https://api.github.com/repos/${ACTION_REPO}"
@@ -133,10 +131,10 @@ runs:
           grep -o '"name": *"[^"]*"' "$rel" >&2 || true
           exit 1
         fi
-        curl -fsSL -o "$bindir/trustless-provisioner" \
+        curl -fsSL -o "$bindir/trustless-ci" \
           "${auth[@]}" -H "Accept: application/octet-stream" \
           "$asset_url"
-        chmod +x "$bindir/trustless-provisioner"
+        chmod +x "$bindir/trustless-ci"
         echo "$bindir" >> "$GITHUB_PATH"
 
     - name: Exchange OIDC token + write cache config
@@ -146,17 +144,23 @@ runs:
         TRUSTLESS_SSH_HOST: ${{ inputs.ssh-host }}
       run: |
         set -euo pipefail
-        sudo -E "$(command -v trustless-provisioner)" auth \
+        sudo -E "$(command -v trustless-ci)" auth \
           --org-slug "${{ inputs.org-slug }}" \
           --audience "${{ inputs.audience }}" \
           --aws-config-path "${{ inputs.aws-config-path }}" \
           --nix-conf-path "${{ inputs.nix-conf-path }}" \
           --output-dir /root/.ssh
+        # The server pins this cache's cluster SSH endpoint (and its host key);
+        # trustless-ci wrote the resolved host to /root/.ssh/trustless_host. The
+        # later steps (known_hosts copy, build store, version push) must target
+        # THAT per-cluster host, not the static `ssh-host` bootstrap default.
+        TRUSTLESS_HOST="$(sudo cat /root/.ssh/trustless_host)"
+        echo "TRUSTLESS_HOST=${TRUSTLESS_HOST}" >> "$GITHUB_ENV"
 
     - name: Install SSH key + known_hosts for the runner user
       shell: bash
       env:
-        SSH_HOST: ${{ inputs.ssh-host }}
+        SSH_HOST: ${{ env.TRUSTLESS_HOST }}
       run: |
         set -euo pipefail
         # The provisioner writes to root (daemon reads /root/.aws/config +
@@ -198,13 +202,13 @@ runs:
     - name: Run build command
       shell: bash
       working-directory: ${{ inputs.working-directory }}
-      # The `--store ssh-ng://…` flag (and `--eval-store <value>` when the
-      # `eval-store` input is non-empty) is appended to the command. This
-      # assumes `command` is a single nix invocation (the default is `nix flake
-      # check`). If you need to run multiple commands or wrap in a shell script,
-      # invoke nix yourself with these flags and leave `command` pointing at the
-      # outer script.
-      run: ${{ inputs.command }} --store ssh-ng://${{ inputs.ssh-host }}${{ inputs.eval-store != '' && format(' --eval-store {0}', inputs.eval-store) || '' }}
+      # `--store ssh-ng://<host> --eval-store auto` is appended to the command:
+      # evaluation runs locally on the runner and only the build is realised on
+      # the remote trustless store (required for import-from-derivation). This
+      # assumes `command` is a single nix invocation (default `nix flake check`);
+      # to run multiple commands, invoke nix yourself with these flags and point
+      # `command` at the outer script.
+      run: ${{ inputs.command }} --store ssh-ng://${{ env.TRUSTLESS_HOST }} --eval-store auto
 
     - name: Publish versioned outputs
       shell: bash
@@ -213,7 +217,7 @@ runs:
         PKGS: ${{ inputs.versioned-packages }}
         CFGS: ${{ inputs.versioned-nixos-configurations }}
         FLAKE: ${{ inputs.versioned-flake }}
-        SSH_HOST: ${{ inputs.ssh-host }}
+        SSH_HOST: ${{ env.TRUSTLESS_HOST }}
       # Resolve the declared outputs to store paths and publish ref->path
       # pointers. The build above must have realised (and thus cached) these
       # paths via the ssh-ng store — `push-version` rejects uncached outputs.
@@ -228,4 +232,4 @@ runs:
         args=(push-versions --flake "$FLAKE" --ssh-host "$SSH_HOST")
         for p in $PKGS; do args+=(--package "$p"); done
         for c in $CFGS; do args+=(--nixos-configuration "$c"); done
-        "$(command -v trustless-provisioner)" "${args[@]}"
+        "$(command -v trustless-ci)" "${args[@]}"
