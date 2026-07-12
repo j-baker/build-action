@@ -71,18 +71,32 @@ download entirely).
 
 ## How it works
 
-1. Downloads the `trustless-ci` binary pinned to the same ref the
+1. Downloads the `trustless` CLI pinned to the same ref the
    action is used with (`@v1`, `@v1.2.3`, or a commit SHA).
-2. Runs `trustless-ci auth`, which:
+2. Runs `trustless setup`, which:
    - Exchanges the GitHub OIDC token for an ephemeral SSH key tied to this
      job (1h lifetime by default) and writes it to `/root/.ssh/id_ed25519`.
-   - Adds the `trustless.build` host key to `/root/.ssh/known_hosts`.
+   - Adds the server-pinned build-host key to `/root/.ssh/known_hosts`.
+   - Writes a keepalive `Host` block (`ServerAliveInterval 15`,
+     `ServerAliveCountMax 3`) to `/root/.ssh/config`, so every SSH
+     connection to the build host detects a dead server and fails within
+     ~45s instead of hanging the job until the workflow timeout.
    - Writes an AWS `[profile trustless-<cache>]` block with a
-     `credential_process = ssh trustless.build creds <cache>` line.
+     `credential_process = ssh <build-host> creds <cache>` line.
    - Appends `extra-substituters` and `extra-trusted-public-keys` entries
      for your cache to the Nix config.
-3. Reloads `nix-daemon` so the new config is picked up.
-4. Runs your `command`.
+   - Exercises the `credential_process` once, so a broken credential chain
+     fails setup with the real ssh error instead of surfacing later as an
+     S3 403.
+3. Copies the SSH key, host-key line, and keepalive block to the runner
+   user's `~/.ssh` (the build and version-push steps run unprivileged).
+4. Reloads `nix-daemon` so the new config is picked up.
+5. Runs your `command` via `trustless run`, which injects
+   `store = ssh-ng://<build-host>` + `eval-store = auto` through NIX_CONFIG:
+   evaluation happens on the runner, builds are realised remotely. A literal
+   `nix flake check` command is special-cased — against a remote store it
+   silently skips building drvs the store hasn't seen, so `run` enumerates
+   the flake's checks and builds them explicitly.
 
 All config writes are idempotent (BEGIN/END markers) — re-running the action
 replaces its blocks in place without duplicating or clobbering unrelated
@@ -91,7 +105,9 @@ config.
 ## Troubleshooting
 
 - **"this repo has no cache assigned"** — your repo isn't mapped to a cache
-  yet. Configure a cache access rule in your Trustless org.
+  yet. Configure a cache access rule in your Trustless org. Access rules are
+  scoped per SCM connection, so the rule must be created under the connection
+  matching your CI provider (e.g. your GitHub connection for GitHub Actions).
 - **"the assigned cache has no signing key yet"** — the cache exists but has
   never been built against. Kick off a first build (manually via `ssh
   trustless.build` or via a Workflow run that skips the substituter).

@@ -5,7 +5,11 @@ description: >-
 
 inputs:
   command:
-    description: Command to run after configuring the cache.
+    description: >-
+      Command to run after configuring the cache (executed via `trustless
+      run`, which injects the remote store through NIX_CONFIG — scripts that
+      invoke nix several times work too). `nix flake check` is handled
+      specially so its checks are actually built remotely.
     required: false
     default: nix flake check
   working-directory:
@@ -24,7 +28,7 @@ inputs:
     default: https://www.trustless.build/api
   ssh-host:
     description: >-
-      Bootstrap SSH host passed to `trustless-ci auth` (TRUSTLESS_SSH_HOST).
+      Bootstrap SSH host passed to `trustless setup` (TRUSTLESS_SSH_HOST).
       The server now pins the per-cluster SSH endpoint AND host key in the token
       exchange, and the action targets that resolved host (TRUSTLESS_HOST) for
       known_hosts, the build store, and version push. This input is only a
@@ -78,7 +82,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Download trustless-ci
+    - name: Download the trustless CLI
       shell: bash
       env:
         # Resolved from the expression context, which is reliably populated in
@@ -97,8 +101,8 @@ runs:
         mkdir -p "$bindir"
         arch="$(uname -m)"
         case "$arch" in
-          x86_64) asset="trustless-ci-x86_64-linux" ;;
-          aarch64) asset="trustless-ci-aarch64-linux" ;;
+          x86_64) asset="trustless-x86_64-linux" ;;
+          aarch64) asset="trustless-aarch64-linux" ;;
           *) echo "unsupported arch: $arch" >&2; exit 1 ;;
         esac
         api="https://api.github.com/repos/${ACTION_REPO}"
@@ -131,10 +135,10 @@ runs:
           grep -o '"name": *"[^"]*"' "$rel" >&2 || true
           exit 1
         fi
-        curl -fsSL -o "$bindir/trustless-ci" \
+        curl -fsSL -o "$bindir/trustless" \
           "${auth[@]}" -H "Accept: application/octet-stream" \
           "$asset_url"
-        chmod +x "$bindir/trustless-ci"
+        chmod +x "$bindir/trustless"
         echo "$bindir" >> "$GITHUB_PATH"
 
     - name: Exchange OIDC token + write cache config
@@ -144,20 +148,20 @@ runs:
         TRUSTLESS_SSH_HOST: ${{ inputs.ssh-host }}
       run: |
         set -euo pipefail
-        sudo -E "$(command -v trustless-ci)" auth \
+        sudo -E "$(command -v trustless)" setup \
           --org-slug "${{ inputs.org-slug }}" \
           --audience "${{ inputs.audience }}" \
           --aws-config-path "${{ inputs.aws-config-path }}" \
           --nix-conf-path "${{ inputs.nix-conf-path }}" \
           --output-dir /root/.ssh
         # The server pins this cache's cluster SSH endpoint (and its host key);
-        # trustless-ci wrote the resolved host to /root/.ssh/trustless_host. The
-        # later steps (known_hosts copy, build store, version push) must target
-        # THAT per-cluster host, not the static `ssh-host` bootstrap default.
+        # `trustless setup` wrote the resolved host to /root/.ssh/trustless_host.
+        # The later steps (known_hosts copy, build store, version push) must
+        # target THAT per-cluster host, not the static `ssh-host` default.
         TRUSTLESS_HOST="$(sudo cat /root/.ssh/trustless_host)"
         echo "TRUSTLESS_HOST=${TRUSTLESS_HOST}" >> "$GITHUB_ENV"
 
-    - name: Install SSH key + known_hosts for the runner user
+    - name: Install SSH key + known_hosts + keepalive config for the runner user
       shell: bash
       env:
         SSH_HOST: ${{ env.TRUSTLESS_HOST }}
@@ -184,6 +188,23 @@ runs:
               grep -qxF "$line" "$HOME/.ssh/known_hosts" \
                 || echo "$line" >> "$HOME/.ssh/known_hosts"
             done
+        # Copy the keepalive Host block trustless-ci wrote to /root/.ssh/config
+        # so the runner user's connections (the long-lived `nix build --store
+        # ssh-ng://…` session and the version push) send keepalives too — a
+        # killed trustless server then fails the job within ~45s instead of
+        # hanging it until the workflow timeout. Root's own connections (the
+        # daemon's creds credential_process) read /root/.ssh/config directly.
+        marker="trustless-${SSH_HOST} ssh config"
+        block="$(sudo sed -n "/^# BEGIN ${marker}\$/,/^# END ${marker}\$/p" /root/.ssh/config)"
+        if [ -z "$block" ]; then
+          echo "ERROR: trustless setup did not write the '${marker}' keepalive block to /root/.ssh/config." >&2
+          exit 1
+        fi
+        touch "$HOME/.ssh/config"
+        chmod 0600 "$HOME/.ssh/config"
+        if ! grep -qxF "# BEGIN ${marker}" "$HOME/.ssh/config"; then
+          printf '%s\n' "$block" >> "$HOME/.ssh/config"
+        fi
 
     - name: Restart nix-daemon
       shell: bash
@@ -202,13 +223,15 @@ runs:
     - name: Run build command
       shell: bash
       working-directory: ${{ inputs.working-directory }}
-      # `--store ssh-ng://<host> --eval-store auto` is appended to the command:
-      # evaluation runs locally on the runner and only the build is realised on
-      # the remote trustless store (required for import-from-derivation). This
-      # assumes `command` is a single nix invocation (default `nix flake check`);
-      # to run multiple commands, invoke nix yourself with these flags and point
-      # `command` at the outer script.
-      run: ${{ inputs.command }} --store ssh-ng://${{ env.TRUSTLESS_HOST }} --eval-store auto
+      # `trustless run` injects `store = ssh-ng://<host>` + `eval-store = auto`
+      # through NIX_CONFIG (evaluation runs locally on the runner; only builds
+      # are realised on the remote trustless store — required for
+      # import-from-derivation), so `command` may also be a script that invokes
+      # nix several times. A literal `nix flake check` is special-cased: against
+      # a remote store it silently skips building drvs the store hasn't seen, so
+      # `run` enumerates the checks and builds them explicitly. The host comes
+      # from TRUSTLESS_HOST, exported by the exchange step above.
+      run: trustless run ${{ inputs.command }}
 
     - name: Publish versioned outputs
       shell: bash
@@ -232,4 +255,4 @@ runs:
         args=(push-versions --flake "$FLAKE" --ssh-host "$SSH_HOST")
         for p in $PKGS; do args+=(--package "$p"); done
         for c in $CFGS; do args+=(--nixos-configuration "$c"); done
-        "$(command -v trustless-ci)" "${args[@]}"
+        "$(command -v trustless)" "${args[@]}"
