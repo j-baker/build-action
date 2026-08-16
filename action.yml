@@ -78,10 +78,40 @@ inputs:
     description: Flake reference to evaluate versioned outputs from.
     required: false
     default: .
+  fetch-cache:
+    description: >-
+      Persist Nix's flake download caches (`~/.cache/nix` tarball-cache,
+      gitv* and fetcher-cache*) across jobs via actions/cache, keyed on
+      flake.lock, so unchanged inputs aren't re-fetched from source every
+      run. Set 'false' to disable.
+    required: false
+    default: "true"
 
 runs:
   using: composite
   steps:
+    # Restore before anything else; the matching save runs automatically in
+    # this action's post phase (and only when the exact key missed, so an
+    # unchanged flake.lock uploads nothing). Only the *download* caches are
+    # shared: tarball-cache (git-object store of unpacked tarballs), gitv*
+    # (bare clones) and fetcher-cache* (url→result sqlite). Everything
+    # restored from them is re-verified against the flake.lock narHash as
+    # Nix copies it into the store, so a tampered entry fails the build
+    # loudly instead of poisoning it. eval-cache-v* is deliberately NOT
+    # cached — it maps locked-flake fingerprints straight to evaluation
+    # results and is trusted blindly, so it must not cross job boundaries.
+    - name: Restore Nix fetch caches
+      if: ${{ inputs.fetch-cache == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/nix/tarball-cache
+          ~/.cache/nix/gitv*
+          ~/.cache/nix/fetcher-cache*
+        key: trustless-nix-fetch-${{ hashFiles('**/flake.lock') }}
+        restore-keys: |
+          trustless-nix-fetch-
+
     - name: Download the trustless CLI
       shell: bash
       env:
@@ -223,14 +253,16 @@ runs:
     - name: Run build command
       shell: bash
       working-directory: ${{ inputs.working-directory }}
-      # `trustless run` injects `store = ssh-ng://<host>` + `eval-store = auto`
-      # through NIX_CONFIG (evaluation runs locally on the runner; only builds
-      # are realised on the remote trustless store — required for
-      # import-from-derivation), so `command` may also be a script that invokes
-      # nix several times. A literal `nix flake check` is special-cased: against
-      # a remote store it silently skips building drvs the store hasn't seen, so
-      # `run` enumerates the checks and builds them explicitly. The host comes
-      # from TRUSTLESS_HOST, exported by the exchange step above.
+      # `trustless run` injects `store = ssh-ng://<host>` through NIX_CONFIG,
+      # so `command` may also be a script that invokes nix several times. A
+      # direct `nix <subcommand>` invocation additionally gets `--eval-store
+      # auto` spliced into its argv (eval-store is a flag, not a settable
+      # option) so evaluation runs locally on the runner — required for
+      # import-from-derivation; script-nested nix calls evaluate against the
+      # remote store instead. `nix flake check` needs no special handling: the
+      # CI image's nix builds checks the store hasn't seen rather than
+      # silently skipping them. The host comes from TRUSTLESS_HOST, exported
+      # by the exchange step above.
       run: trustless run ${{ inputs.command }}
 
     - name: Publish versioned outputs

@@ -40,6 +40,26 @@ fail with a clear message otherwise.
 | `aws-config-path` | `/root/.aws/config` | Where the `[profile trustless-…]` block is written. Read by the nix daemon (root) to mint substituter creds. |
 | `nix-conf-path` | `/etc/nix/nix.conf` | Where substituter + trusted-public-keys lines are appended (system-wide). |
 | `github-token` | `${{ github.token }}` | Token used to download the release asset. Only override when this action's repo is private and consumed from a different repo — see "Private action repo" below. |
+| `fetch-cache` | `true` | Persist Nix's flake download caches across jobs via `actions/cache` — see "Flake fetch caching" below. |
+
+## Flake fetch caching
+
+By default the action restores and saves Nix's flake *download* caches
+(`~/.cache/nix/tarball-cache`, `gitv*`, `fetcher-cache*`) with
+`actions/cache`, keyed on `flake.lock`, so jobs stop re-fetching unchanged
+flake inputs from source. GitHub owns the storage and the cleanup: caches
+unused for 7 days are evicted, and the per-repo quota (10 GB) is reclaimed
+LRU. The save only happens when the exact key missed, i.e. when
+`flake.lock` changed.
+
+Integrity: everything restored from these caches is re-verified against the
+`flake.lock` narHash as Nix copies it into the store, so a tampered cache
+entry fails the build rather than poisoning it. The evaluation cache
+(`eval-cache-v*`) is deliberately excluded — it is trusted blindly by Nix,
+so it never crosses job boundaries. Unlocked references (registry lookups,
+`fetchTarball` without a hash) carry no such check; caches are scoped
+per-repo by GitHub, so that surface is limited to actors who can already
+run the repo's workflows. Set `fetch-cache: false` to opt out.
 
 ## Private action repo
 
@@ -72,7 +92,9 @@ download entirely).
 ## How it works
 
 1. Downloads the `trustless` CLI pinned to the same ref the
-   action is used with (`@v1`, `@v1.2.3`, or a commit SHA).
+   action is used with. Releases exist for exact versions (`@v1.2.3`) and
+   for the major and minor aliases (`@v1` tracks the latest release,
+   `@v1.2` the latest patch of that minor line).
 2. Runs `trustless setup`, which:
    - Exchanges the GitHub OIDC token for an ephemeral SSH key tied to this
      job (1h lifetime by default) and writes it to `/root/.ssh/id_ed25519`.
@@ -92,11 +114,14 @@ download entirely).
    user's `~/.ssh` (the build and version-push steps run unprivileged).
 4. Reloads `nix-daemon` so the new config is picked up.
 5. Runs your `command` via `trustless run`, which injects
-   `store = ssh-ng://<build-host>` + `eval-store = auto` through NIX_CONFIG:
-   evaluation happens on the runner, builds are realised remotely. A literal
-   `nix flake check` command is special-cased — against a remote store it
-   silently skips building drvs the store hasn't seen, so `run` enumerates
-   the flake's checks and builds them explicitly.
+   `store = ssh-ng://<build-host>` through NIX_CONFIG and, when the command
+   is a direct `nix <subcommand>` invocation, `--eval-store auto` into the
+   argv (`eval-store` is not a Nix setting, so it cannot ride in NIX_CONFIG):
+   evaluation happens on the runner, builds are realised remotely. A script
+   command still works — its nix calls evaluate against the remote store.
+   `nix flake check` needs no special handling: the nix in the CI image
+   builds checks the remote store hasn't seen instead of silently skipping
+   them (drv-skip.patch, upstream PR 16125).
 
 All config writes are idempotent (BEGIN/END markers) — re-running the action
 replaces its blocks in place without duplicating or clobbering unrelated
