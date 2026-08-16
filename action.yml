@@ -80,7 +80,7 @@ inputs:
     default: .
   fetch-cache:
     description: >-
-      Persist Nix's flake download caches (`~/.cache/nix` tarball-cache,
+      Persist Nix's flake download caches (`~/.cache/nix` tarball-cache*,
       gitv* and fetcher-cache*) across jobs via actions/cache, keyed on
       flake.lock, so unchanged inputs aren't re-fetched from source every
       run. Set 'false' to disable.
@@ -93,8 +93,13 @@ runs:
     # Restore before anything else; the matching save runs automatically in
     # this action's post phase (and only when the exact key missed, so an
     # unchanged flake.lock uploads nothing). Only the *download* caches are
-    # shared: tarball-cache (git-object store of unpacked tarballs), gitv*
-    # (bare clones) and fetcher-cache* (url→result sqlite). Everything
+    # shared: tarball-cache* (git-object store of unpacked tarballs), gitv*
+    # (bare clones) and fetcher-cache* (url→result sqlite). Every one of
+    # these directory names is version-suffixed and the suffix moves with
+    # nix releases (tarball-cache became tarball-cache-v2 in Determinate
+    # Nix 3.x, gitv3, fetcher-cache-v4.sqlite), so every path here MUST be
+    # a glob — a literal name silently caches nothing when the suffix
+    # bumps, which for github: inputs is the entire tarball store. Everything
     # restored from them is re-verified against the flake.lock narHash as
     # Nix copies it into the store, so a tampered entry fails the build
     # loudly instead of poisoning it. eval-cache-v* is deliberately NOT
@@ -105,7 +110,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: |
-          ~/.cache/nix/tarball-cache
+          ~/.cache/nix/tarball-cache*
           ~/.cache/nix/gitv*
           ~/.cache/nix/fetcher-cache*
         key: trustless-nix-fetch-${{ hashFiles('**/flake.lock') }}

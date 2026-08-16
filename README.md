@@ -45,7 +45,8 @@ fail with a clear message otherwise.
 ## Flake fetch caching
 
 By default the action restores and saves Nix's flake *download* caches
-(`~/.cache/nix/tarball-cache`, `gitv*`, `fetcher-cache*`) with
+(`~/.cache/nix/tarball-cache*`, `gitv*`, `fetcher-cache*` — all globs, since
+Nix version-suffixes these names: `tarball-cache-v2`, `gitv3`, …) with
 `actions/cache`, keyed on `flake.lock`, so jobs stop re-fetching unchanged
 flake inputs from source. GitHub owns the storage and the cleanup: caches
 unused for 7 days are evicted, and the per-repo quota (10 GB) is reclaimed
